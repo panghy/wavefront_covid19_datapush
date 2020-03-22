@@ -35,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import static java.util.Optional.empty;
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
@@ -122,7 +123,7 @@ public class WavefrontCOVID19DataLoader {
                                   boolean startFromBeginningOfYear) {
     try (InputStream inputStream = WavefrontCOVID19DataLoader.class.getResourceAsStream("/country data.csv")) {
       CSVParser records = CSVFormat.RFC4180.withFirstRecordAsHeader().withAllowMissingColumnNames().
-          parse(new InputStreamReader(inputStream));
+          withTrim().parse(new InputStreamReader(inputStream));
       for (CSVRecord csvRecord : records) {
         String country = csvRecord.get(0);
         long population = Long.parseLong(csvRecord.get(1));
@@ -426,11 +427,13 @@ public class WavefrontCOVID19DataLoader {
         JsonNode data = OBJECT_MAPPER.readTree(response.body().string());
         for (JsonNode stateNode : data) {
           String stateCode = stateNode.get("state").asText();
-          long positive = jsonNodeToNumber(stateNode.get("positive"));
-          long negative = jsonNodeToNumber(stateNode.get("negative"));
-          long pending = jsonNodeToNumber(stateNode.get("pending"));
-          long death = jsonNodeToNumber(stateNode.get("death"));
-          long total = jsonNodeToNumber(stateNode.get("total"));
+          Optional<Long> positive = jsonNodeToNumber(stateNode.get("positive"));
+          Optional<Long> negative = jsonNodeToNumber(stateNode.get("negative"));
+          Optional<Long> pending = jsonNodeToNumber(stateNode.get("pending"));
+          Optional<Long> death = jsonNodeToNumber(stateNode.get("death"));
+          Optional<Long> total = jsonNodeToNumber(stateNode.get("total"));
+          Optional<Long> hospitalized = jsonNodeToNumber(stateNode.get("hospitalized"));
+          Optional<Long> score = stateNode.has("score") ? jsonNodeToNumber(stateNode.get("score")) : empty();
           ZonedDateTime checkTimeEt = LocalDateTime.parse(stateNode.get("checkTimeEt").asText(), MONTH_DAY_HOUR_MINUTE).
               with(ChronoField.YEAR, 2020).atZone(ET);
           GeocodingResult[] geocodingResult = geocodeStateCode(geoApiContext, stateCode);
@@ -472,11 +475,32 @@ public class WavefrontCOVID19DataLoader {
             tags.put("version", "1");
             long timestamp = checkTimeEt.toEpochSecond();
             ppsRateLimiter.acquire(5);
-            wavefrontSender.sendMetric("com.covidtracking.positive", positive, timestamp, "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.negative", negative, timestamp, "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.pending", pending, timestamp, "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.death", death, timestamp, "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.total", total, timestamp, "covidtracking.com", tags);
+            if (positive.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.positive", positive.get(), timestamp, "covidtracking.com",
+                  tags);
+            }
+            if (negative.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.negative", negative.get(), timestamp, "covidtracking.com",
+                  tags);
+            }
+            if (pending.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.pending", pending.get(), timestamp, "covidtracking.com",
+                  tags);
+            }
+            if (death.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.death", death.get(), timestamp, "covidtracking.com", tags);
+            }
+            if (total.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.total", total.get(), timestamp, "covidtracking.com", tags);
+            }
+            if (hospitalized.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.hospitalized", hospitalized.get(), timestamp,
+                  "covidtracking.com", tags);
+            }
+            if (score.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.score", score.get(), timestamp,
+                  "covidtracking.com", tags);
+            }
           }
         }
       }
@@ -493,11 +517,12 @@ public class WavefrontCOVID19DataLoader {
         JsonNode data = OBJECT_MAPPER.readTree(response.body().string());
         for (JsonNode stateNode : data) {
           String stateCode = stateNode.get("state").asText();
-          long positive = jsonNodeToNumber(stateNode.get("positive"));
-          long negative = jsonNodeToNumber(stateNode.get("negative"));
-          long pending = jsonNodeToNumber(stateNode.get("pending"));
-          long death = jsonNodeToNumber(stateNode.get("death"));
-          long total = jsonNodeToNumber(stateNode.get("total"));
+          Optional<Long> positive = jsonNodeToNumber(stateNode.get("positive"));
+          Optional<Long> negative = jsonNodeToNumber(stateNode.get("negative"));
+          Optional<Long> pending = jsonNodeToNumber(stateNode.get("pending"));
+          Optional<Long> death = jsonNodeToNumber(stateNode.get("death"));
+          Optional<Long> total = jsonNodeToNumber(stateNode.get("total"));
+          Optional<Long> hospitalized = jsonNodeToNumber(stateNode.get("hospitalized"));
           LocalDateTime dateChecked = LocalDateTime.parse(stateNode.get("dateChecked").asText(),
               DateTimeFormatter.ISO_OFFSET_DATE_TIME);
           GeocodingResult[] geocodingResult = geocodeStateCode(geoApiContext, stateCode);
@@ -539,16 +564,28 @@ public class WavefrontCOVID19DataLoader {
             tags.put("version", "1");
             long timestamp = dateChecked.toEpochSecond(ZoneOffset.UTC);
             ppsRateLimiter.acquire(5);
-            wavefrontSender.sendMetric("com.covidtracking.positive", positive, timestamp,
-                "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.negative", negative, timestamp,
-                "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.pending", pending, timestamp,
-                "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.death", death, timestamp,
-                "covidtracking.com", tags);
-            wavefrontSender.sendMetric("com.covidtracking.total", total, timestamp,
-                "covidtracking.com", tags);
+            if (positive.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.positive", positive.get(), timestamp, "covidtracking.com",
+                  tags);
+            }
+            if (negative.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.negative", negative.get(), timestamp, "covidtracking.com",
+                  tags);
+            }
+            if (pending.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.pending", pending.get(), timestamp, "covidtracking.com",
+                  tags);
+            }
+            if (death.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.death", death.get(), timestamp, "covidtracking.com", tags);
+            }
+            if (total.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.total", total.get(), timestamp, "covidtracking.com", tags);
+            }
+            if (hospitalized.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.hospitalized", hospitalized.get(), timestamp,
+                  "covidtracking.com", tags);
+            }
           }
         }
       }
@@ -586,9 +623,9 @@ public class WavefrontCOVID19DataLoader {
         });
   }
 
-  private long jsonNodeToNumber(JsonNode node) {
-    if (node.isNull()) return 0;
-    return Long.parseLong(node.asText());
+  private Optional<Long> jsonNodeToNumber(JsonNode node) {
+    if (node.isNull()) return empty();
+    return Optional.of(Long.parseLong(node.asText()));
   }
 
   private String iso2CountryCodeToIso3CountryCode(String iso2CountryCode) {
