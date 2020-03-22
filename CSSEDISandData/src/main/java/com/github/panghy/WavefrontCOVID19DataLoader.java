@@ -36,9 +36,9 @@ import java.util.logging.Logger;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
-public class CSSEDISandDataLoader {
+public class WavefrontCOVID19DataLoader {
 
-  private static final Logger log = Logger.getLogger(CSSEDISandDataLoader.class.getCanonicalName());
+  private static final Logger log = Logger.getLogger(WavefrontCOVID19DataLoader.class.getCanonicalName());
 
   @Parameter(names = "--wavefrontUrl")
   public String wavefrontUrl = "https://longboard.wavefront.com";
@@ -66,7 +66,7 @@ public class CSSEDISandDataLoader {
   private final Map<String, GeocodingResult[]> cachedGeocodingResults = new HashMap<>();
 
   public static void main(String[] args) throws Exception {
-    CSSEDISandDataLoader dataLoader = new CSSEDISandDataLoader();
+    WavefrontCOVID19DataLoader dataLoader = new WavefrontCOVID19DataLoader();
     new JCommander(dataLoader, null, args);
     dataLoader.run();
   }
