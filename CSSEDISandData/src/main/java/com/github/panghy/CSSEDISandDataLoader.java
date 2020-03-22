@@ -85,7 +85,8 @@ public class CSSEDISandDataLoader {
     while (true) {
       long start = System.currentTimeMillis();
       try {
-        covidTrackingUSStatesDataHistorical(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
+        // only need to run this once to get historical data.
+        //covidTrackingUSStatesDataHistorical(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
         covidTrackingUSStatesData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
         fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
             "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv",
