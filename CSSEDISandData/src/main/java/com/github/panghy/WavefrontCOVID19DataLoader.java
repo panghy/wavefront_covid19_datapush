@@ -21,9 +21,10 @@ import okhttp3.Response;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
-import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.StringReader;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -34,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 public class WavefrontCOVID19DataLoader {
@@ -51,6 +53,9 @@ public class WavefrontCOVID19DataLoader {
 
   @Parameter(names = "--flushPPS")
   public double flushPPS = 10000.0;
+
+  @Parameter(names = "--historical")
+  public boolean historical = false;
 
   private static final DateTimeFormatter MONTH_DAY_YEAR = DateTimeFormatter.ofPattern("M/d/[uuuu][uu]");
   private static final DateTimeFormatter MONTH_DAY_HOUR_MINUTE = new DateTimeFormatterBuilder()
@@ -80,13 +85,17 @@ public class WavefrontCOVID19DataLoader {
     GeoApiContext geoApiContext = new GeoApiContext.Builder()
         .apiKey(googleGeolocationApiToken)
         .build();
-    WavefrontSender wavefrontSender = new WavefrontDirectIngestionClient.Builder(wavefrontUrl, wavefrontToken).build();
+    WavefrontSender wavefrontSender = new WavefrontDirectIngestionClient.Builder(wavefrontUrl, wavefrontToken).
+        maxQueueSize(1_000_000).build();
     RateLimiter ppsRateLimiter = RateLimiter.create(flushPPS);
     while (true) {
       long start = System.currentTimeMillis();
       try {
+        injectCountryStats(geoApiContext, wavefrontSender, ppsRateLimiter, historical);
         // only need to run this once to get historical data.
-        //covidTrackingUSStatesDataHistorical(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
+        if (historical) {
+          covidTrackingUSStatesDataHistorical(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
+        }
         covidTrackingUSStatesData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
         fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
             "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv",
@@ -108,6 +117,106 @@ public class WavefrontCOVID19DataLoader {
     }
   }
 
+  private void injectCountryStats(GeoApiContext geoApiContext,
+                                  WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter,
+                                  boolean startFromBeginningOfYear) {
+    try (InputStream inputStream = WavefrontCOVID19DataLoader.class.getResourceAsStream("/country data.csv")) {
+      CSVParser records = CSVFormat.RFC4180.withFirstRecordAsHeader().withAllowMissingColumnNames().
+          parse(new InputStreamReader(inputStream));
+      for (CSVRecord csvRecord : records) {
+        String country = csvRecord.get(0);
+        long population = Long.parseLong(csvRecord.get(1));
+        long density = Long.parseLong(csvRecord.get(2));
+        long landArea = Long.parseLong(csvRecord.get(3));
+        int medianAge = Integer.parseInt(csvRecord.get(4));
+        int urbanPercentage = Integer.parseInt(csvRecord.get(5));
+
+        GeocodingResult[] geocodingResult = cachedGeocodingResults.computeIfAbsent("Country " + country, key -> {
+          try {
+            return GeocodingApi.geocode(geoApiContext, key).await();
+          } catch (ApiException | InterruptedException | IOException e) {
+            throw new RuntimeException(e);
+          }
+        });
+        if (geocodingResult.length > 0) {
+          GeocodingResult firstResult = geocodingResult[0];
+          Optional<AddressComponent> geocodedCountry = Arrays.stream(firstResult.addressComponents).
+              filter(ac -> Arrays.stream(ac.types).anyMatch(act -> act == AddressComponentType.COUNTRY)).
+              findFirst();
+          if (geocodedCountry.isPresent()) {
+            Map<String, String> tags = new HashMap<>();
+            if (firstResult.geometry != null) {
+              LatLng location = firstResult.geometry.location;
+              if (location != null) {
+                tags.put("lat", String.valueOf(location.lat));
+                tags.put("long", String.valueOf(location.lng));
+              }
+            }
+            tags.put("version", "1");
+            if (isNotBlank(geocodedCountry.get().longName)) {
+              tags.put("country", geocodedCountry.get().longName);
+            } else {
+              tags.put("country", country);
+            }
+            if (isNotBlank(geocodedCountry.get().shortName)) {
+              tags.put("country_short", geocodedCountry.get().shortName);
+            }
+            long timestamp = LocalDate.now(UTC).atTime(LocalDateTime.now(UTC).getHour(), 0).
+                toEpochSecond(ZoneOffset.UTC);
+            LocalDateTime date = LocalDateTime.of(2020, 1, 1, 0, 0);
+            if (startFromBeginningOfYear) {
+              while (true) {
+                long oldTs = date.toEpochSecond(ZoneOffset.UTC);
+                if (oldTs >= timestamp) break;
+                date = date.plusHours(1);
+                emitCountryStats(wavefrontSender, ppsRateLimiter, population, density, landArea, medianAge,
+                    urbanPercentage, tags, oldTs);
+              }
+            }
+            emitCountryStats(wavefrontSender, ppsRateLimiter, population, density, landArea, medianAge,
+                urbanPercentage, tags, timestamp);
+          } else {
+            log.log(Level.WARNING, "Country: " + country + " cannot be geocoded");
+          }
+        } else {
+          log.log(Level.WARNING, "Country: " + country + " cannot be geocoded");
+        }
+      }
+    } catch (IOException e) {
+      log.log(Level.SEVERE, "Uncaught exception when processing country data", e);
+    }
+  }
+
+  private void emitCountryStats(WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter, long population,
+                                long density, long landArea, int medianAge, int urbanPercentage,
+                                Map<String, String> tags, long timestamp) throws IOException {
+    if (population > 0) {
+      ppsRateLimiter.acquire();
+      wavefrontSender.sendMetric("info.worldometers.population", population,
+          timestamp, "worldometers.info", tags);
+    }
+    if (density > 0) {
+      ppsRateLimiter.acquire();
+      wavefrontSender.sendMetric("info.worldometers.density", density,
+          timestamp, "worldometers.info", tags);
+    }
+    if (landArea > 0) {
+      ppsRateLimiter.acquire();
+      wavefrontSender.sendMetric("info.worldometers.land_area", landArea,
+          timestamp, "worldometers.info", tags);
+    }
+    if (medianAge > 0) {
+      ppsRateLimiter.acquire();
+      wavefrontSender.sendMetric("info.worldometers.median_age", medianAge,
+          timestamp, "worldometers.info", tags);
+    }
+    if (urbanPercentage > 0) {
+      ppsRateLimiter.acquire();
+      wavefrontSender.sendMetric("info.worldometers.urban_population_percentage", urbanPercentage,
+          timestamp, "worldometers.info", tags);
+    }
+  }
+
   private void fetchAndProcessCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
                                        WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter,
                                        String url, String context) {
@@ -125,7 +234,7 @@ public class WavefrontCOVID19DataLoader {
         Map<Integer, LocalDate> columnOrdinalToDates = new HashMap<>();
         for (int i = 4; i < headerNames.size(); i++) {
           String dateHeader = headerNames.get(i);
-          if (!StringUtils.isBlank(dateHeader)) {
+          if (!isBlank(dateHeader)) {
             LocalDate date = LocalDate.parse(dateHeader, MONTH_DAY_YEAR);
             columnOrdinalToDates.put(i, date);
           }
@@ -151,32 +260,32 @@ public class WavefrontCOVID19DataLoader {
                 }
               });
           Map<String, String> tags = new HashMap<>();
-          if (!StringUtils.isBlank(countryRegion)) {
+          if (!isBlank(countryRegion)) {
             tags.put("csse_country", countryRegion);
             Optional<AddressComponent> geocodedCountry = Arrays.stream(addressComponents).
                 filter(ac -> Arrays.stream(ac.types).anyMatch(act -> act == AddressComponentType.COUNTRY)).
                 findFirst();
             if (geocodedCountry.isPresent()) {
-              if (StringUtils.isBlank(geocodedCountry.get().longName)) {
+              if (isBlank(geocodedCountry.get().longName)) {
                 tags.put("country", countryRegion);
               } else {
                 tags.put("country", geocodedCountry.get().longName);
               }
-              if (!StringUtils.isBlank(geocodedCountry.get().shortName)) {
+              if (!isBlank(geocodedCountry.get().shortName)) {
                 tags.put("country_short", geocodedCountry.get().shortName);
               }
             } else {
               tags.put("country", countryRegion);
             }
           }
-          if (!StringUtils.isBlank(provinceState)) {
+          if (!isBlank(provinceState)) {
             tags.put("csse_province", provinceState);
             Optional<AddressComponent> geocodedProvince = Arrays.stream(addressComponents).
                 filter(ac -> Arrays.stream(ac.types).anyMatch(act ->
                     act == AddressComponentType.ADMINISTRATIVE_AREA_LEVEL_1)).
                 findFirst();
             if (geocodedProvince.isPresent()) {
-              if (StringUtils.isBlank(geocodedProvince.get().longName)) {
+              if (isBlank(geocodedProvince.get().longName)) {
                 tags.put("province_state", provinceState);
               } else {
                 tags.put("province_state", geocodedProvince.get().longName);
@@ -192,7 +301,7 @@ public class WavefrontCOVID19DataLoader {
           tags.put("lat", String.valueOf(latitude));
           tags.put("long", String.valueOf(longitude));
           for (int i = 4; i < csvRecord.size(); i++) {
-            if (columnOrdinalToDates.containsKey(i) && !StringUtils.isBlank(csvRecord.get(i))) {
+            if (columnOrdinalToDates.containsKey(i) && !isBlank(csvRecord.get(i))) {
               int count = Integer.parseInt(csvRecord.get(i));
               LocalDate date = columnOrdinalToDates.get(i);
               ZonedDateTime utcDateTime = date.atStartOfDay(UTC);
@@ -224,7 +333,7 @@ public class WavefrontCOVID19DataLoader {
         Map<Integer, LocalDate> columnOrdinalToDates = new HashMap<>();
         for (int i = 3; i < headerNames.size(); i++) {
           String dateHeader = headerNames.get(i);
-          if (!StringUtils.isBlank(dateHeader)) {
+          if (!isBlank(dateHeader)) {
             LocalDate date = LocalDate.parse(dateHeader, MONTH_DAY_YEAR);
             columnOrdinalToDates.put(i, date);
           }
@@ -233,9 +342,9 @@ public class WavefrontCOVID19DataLoader {
           String provinceState = csvRecord.get(0);
           String countryRegion = csvRecord.get(1);
           String whoRegion = csvRecord.get(2);
-          String geocodingInput = StringUtils.isBlank(provinceState) ? "" : provinceState + ", ";
+          String geocodingInput = isBlank(provinceState) ? "" : provinceState + ", ";
           geocodingInput += countryRegion;
-          if (!StringUtils.isBlank(whoRegion)) {
+          if (!isBlank(whoRegion)) {
             geocodingInput += ", " + whoRegion;
           }
           String finalGeocodingInput = geocodingInput;
@@ -283,18 +392,18 @@ public class WavefrontCOVID19DataLoader {
               }
             }
           }
-          if (!StringUtils.isBlank(countryRegion)) {
+          if (!isBlank(countryRegion)) {
             tags.put("who_country", countryRegion);
           }
-          if (!StringUtils.isBlank(provinceState)) {
+          if (!isBlank(provinceState)) {
             tags.put("who_province_state", provinceState);
           }
-          if (!StringUtils.isBlank(whoRegion)) {
+          if (!isBlank(whoRegion)) {
             tags.put("who_region", whoRegion);
           }
           tags.put("version", "3");
           for (int i = 3; i < csvRecord.size(); i++) {
-            if (columnOrdinalToDates.containsKey(i) && !StringUtils.isBlank(csvRecord.get(i))) {
+            if (columnOrdinalToDates.containsKey(i) && !isBlank(csvRecord.get(i))) {
               int count = Integer.parseInt(csvRecord.get(i));
               LocalDate date = columnOrdinalToDates.get(i);
               ZonedDateTime utcDateTime = date.atStartOfDay(GENEVA);
