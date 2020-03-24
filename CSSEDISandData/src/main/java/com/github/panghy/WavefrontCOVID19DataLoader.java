@@ -63,6 +63,9 @@ public class WavefrontCOVID19DataLoader {
       .appendPattern("M/d HH:mm")
       .parseDefaulting(ChronoField.YEAR, 2020)
       .toFormatter(Locale.ENGLISH);
+  private static final DateTimeFormatter JHU_TS_V2 = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
+  private static final DateTimeFormatter JHU_DAILY_FILE_FORMAT = DateTimeFormatter.ofPattern("MM-dd-uuuu");
+
   private static final ZoneId UTC = ZoneId.of("UTC");
   private static final ZoneId GENEVA = ZoneId.of("GMT+1");
   private static final ZoneId ET = ZoneId.of("America/New_York");
@@ -92,12 +95,18 @@ public class WavefrontCOVID19DataLoader {
     while (true) {
       long start = System.currentTimeMillis();
       try {
-        injectCountryStats(geoApiContext, wavefrontSender, ppsRateLimiter, historical);
-        // only need to run this once to get historical data.
-        if (historical) {
-          covidTrackingUSStatesDataHistorical(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
+        // JHU daily data v2
+        LocalDate csvFileDate = LocalDate.of(2020, 3, 23);
+        LocalDate today = LocalDate.now(UTC);
+        while (!csvFileDate.isAfter(today)) {
+          String file = JHU_DAILY_FILE_FORMAT.format(csvFileDate) + ".csv";
+          log.info("Processing JHU Daily: " + file);
+          fetchAndProcessDailyCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
+              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/" + file);
+          csvFileDate = csvFileDate.plusDays(1);
         }
-        covidTrackingUSStatesData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
+        log.info("Processing JHU Aggregated (until 3/22/2020)");
+        // JHU CSSE data until 3/22 (3/23 switches to the new data).
         fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
             "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv",
             "confirmed_cases");
@@ -107,6 +116,19 @@ public class WavefrontCOVID19DataLoader {
         fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
             "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Recovered.csv",
             "recovered");
+        log.info("Processing worldometer.info stats");
+        // worldometer.info world stats
+        injectCountryStats(geoApiContext, wavefrontSender, ppsRateLimiter, historical);
+        // only need to run this once to get historical data.
+        if (historical) {
+          log.info("Processing worldometer.info historical stats");
+          covidTrackingUSStatesDataHistorical(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
+        }
+        log.info("Processing covidtracking.com data");
+        // covidtracking.com (current)
+        covidTrackingUSStatesData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter);
+        // WHO data
+        log.info("Processing JHU WHO data");
         fetchAndProcessWHOData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
             "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/who_covid_19_situation_reports/who_covid_19_sit_rep_time_series/who_covid_19_sit_rep_time_series.csv",
             "confirmed");
@@ -218,6 +240,130 @@ public class WavefrontCOVID19DataLoader {
     }
   }
 
+  private void fetchAndProcessDailyCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
+                                            WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter,
+                                            String url) {
+    try (Response response = httpClient.newCall(
+        new Request.Builder().url(url).get().build()).
+        execute()) {
+      if (response.code() != 200 || response.body() == null) {
+        log.log(Level.WARNING, "Cannot fetch daily JHU data: " + url + " " + response.code());
+      } else {
+        String body = response.body().string();
+        CSVParser records = CSVFormat.RFC4180.withFirstRecordAsHeader().withAllowMissingColumnNames().
+            parse(new StringReader(body));
+        for (CSVRecord csvRecord : records) {
+          String fips = csvRecord.get("FIPS");
+          String admin2 = csvRecord.get("Admin2");
+          String provinceState = csvRecord.get("Province_State");
+          String countryRegion = csvRecord.get("Country_Region");
+          double latitude = Double.parseDouble(csvRecord.get("Lat"));
+          double longitude = Double.parseDouble(csvRecord.get("Long_"));
+          long confirmed = Long.parseLong(csvRecord.get("Confirmed"));
+          long deaths = Long.parseLong(csvRecord.get("Deaths"));
+          long recovered = Long.parseLong(csvRecord.get("Recovered"));
+          long active = Long.parseLong(csvRecord.get("Active"));
+          LocalDateTime lastUpdate = LocalDateTime.parse(csvRecord.get("Last_Update"), JHU_TS_V2);
+
+          AddressComponent[] addressComponents =
+              cachedReverseGeocodingResults.computeIfAbsent(new Pair<>(latitude, longitude), latlong -> {
+                GeocodingResult[] geocodingResults;
+                try {
+                  geocodingResults = GeocodingApi.reverseGeocode(geoApiContext,
+                      new LatLng(latitude, longitude)).await();
+                } catch (ApiException | IOException | InterruptedException e) {
+                  throw new RuntimeException(e);
+                }
+                if (geocodingResults.length == 0) {
+                  return new AddressComponent[0];
+                } else {
+                  return geocodingResults[0].addressComponents;
+                }
+              });
+          Map<String, String> tags = new HashMap<>();
+          // country
+          if (!isBlank(countryRegion)) {
+            tags.put("csse_country", countryRegion);
+            Optional<AddressComponent> geocodedCountry = Arrays.stream(addressComponents).
+                filter(ac -> Arrays.stream(ac.types).anyMatch(act -> act == AddressComponentType.COUNTRY)).
+                findFirst();
+            if (geocodedCountry.isPresent()) {
+              if (isBlank(geocodedCountry.get().longName)) {
+                tags.put("country", countryRegion);
+              } else {
+                tags.put("country", geocodedCountry.get().longName);
+              }
+              if (!isBlank(geocodedCountry.get().shortName)) {
+                tags.put("country_short", geocodedCountry.get().shortName);
+              }
+            } else {
+              tags.put("country", countryRegion);
+            }
+          }
+          // state
+          if (!isBlank(provinceState)) {
+            tags.put("csse_province", provinceState);
+            Optional<AddressComponent> geocodedProvince = Arrays.stream(addressComponents).
+                filter(ac -> Arrays.stream(ac.types).anyMatch(act ->
+                    act == AddressComponentType.ADMINISTRATIVE_AREA_LEVEL_1)).
+                findFirst();
+            if (geocodedProvince.isPresent()) {
+              if (isBlank(geocodedProvince.get().longName)) {
+                tags.put("province_state", provinceState);
+              } else {
+                tags.put("province_state", geocodedProvince.get().longName);
+              }
+              if (isNotBlank(geocodedProvince.get().shortName)) {
+                tags.put("province_state_short", geocodedProvince.get().shortName);
+              }
+            } else {
+              tags.put("province_state", provinceState);
+            }
+          }
+          // county
+          if (!isBlank(admin2)) {
+            tags.put("csse_admin2", admin2);
+            Optional<AddressComponent> geocodedAdmin2 = Arrays.stream(addressComponents).
+                filter(ac -> Arrays.stream(ac.types).anyMatch(act ->
+                    act == AddressComponentType.ADMINISTRATIVE_AREA_LEVEL_2)).
+                findFirst();
+            if (geocodedAdmin2.isPresent()) {
+              if (isBlank(geocodedAdmin2.get().longName)) {
+                tags.put("admin2", provinceState);
+              } else {
+                tags.put("admin2", geocodedAdmin2.get().longName);
+              }
+              if (isNotBlank(geocodedAdmin2.get().shortName) &&
+                  !geocodedAdmin2.get().shortName.equals(tags.get("admin2"))) {
+                tags.put("admin2_short", geocodedAdmin2.get().shortName);
+              }
+            } else {
+              tags.put("admin2", provinceState);
+            }
+          }
+          tags.put("version", "4");
+          tags.put("lat", String.valueOf(latitude));
+          tags.put("long", String.valueOf(longitude));
+          if (isNotBlank(fips)) {
+            tags.put("fips", fips);
+          }
+          ZonedDateTime utcDateTime = lastUpdate.atZone(UTC);
+          ppsRateLimiter.acquire(4);
+          wavefrontSender.sendMetric("csse.confirmed_cases", confirmed, utcDateTime.toEpochSecond(), "csse",
+              tags);
+          wavefrontSender.sendMetric("csse.deaths", deaths, utcDateTime.toEpochSecond(), "csse",
+              tags);
+          wavefrontSender.sendMetric("csse.recovered", recovered, utcDateTime.toEpochSecond(), "csse",
+              tags);
+          wavefrontSender.sendMetric("csse.active", active, utcDateTime.toEpochSecond(), "csse",
+              tags);
+        }
+      }
+    } catch (Exception ex) {
+      log.log(Level.SEVERE, "Uncaught exception when processing CSSE data for: " + url, ex);
+    }
+  }
+
   private void fetchAndProcessCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
                                        WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter,
                                        String url, String context) {
@@ -225,7 +371,7 @@ public class WavefrontCOVID19DataLoader {
         new Request.Builder().url(url).get().build()).
         execute()) {
       if (response.code() != 200 || response.body() == null) {
-        log.log(Level.WARNING, "Cannot fetch confirmed cases data");
+        log.log(Level.WARNING, "Cannot fetch data: " + url + " " + response.code());
       } else {
         String body = response.body().string();
         CSVParser records = CSVFormat.RFC4180.withFirstRecordAsHeader().withAllowMissingColumnNames().
@@ -298,13 +444,18 @@ public class WavefrontCOVID19DataLoader {
               tags.put("province_state", provinceState);
             }
           }
-          tags.put("version", "2");
+          tags.put("version", "4");
           tags.put("lat", String.valueOf(latitude));
           tags.put("long", String.valueOf(longitude));
           for (int i = 4; i < csvRecord.size(); i++) {
             if (columnOrdinalToDates.containsKey(i) && !isBlank(csvRecord.get(i))) {
               int count = Integer.parseInt(csvRecord.get(i));
               LocalDate date = columnOrdinalToDates.get(i);
+              // for march 23, 2020 and newer, we use the newer data format
+              // https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/03-23-2020.csv
+              if (date.isAfter(LocalDate.of(2020, 3, 22))) {
+                break;
+              }
               ZonedDateTime utcDateTime = date.atStartOfDay(UTC);
               ppsRateLimiter.acquire();
               wavefrontSender.sendMetric("csse." + context, count, utcDateTime.toEpochSecond(), "csse", tags);
@@ -313,7 +464,7 @@ public class WavefrontCOVID19DataLoader {
         }
       }
     } catch (Exception ex) {
-      log.log(Level.SEVERE, "Uncaught exception when processing CSSE data", ex);
+      log.log(Level.SEVERE, "Uncaught exception when processing CSSE data: " + url, ex);
     }
   }
 
@@ -405,7 +556,14 @@ public class WavefrontCOVID19DataLoader {
           tags.put("version", "3");
           for (int i = 3; i < csvRecord.size(); i++) {
             if (columnOrdinalToDates.containsKey(i) && !isBlank(csvRecord.get(i))) {
-              int count = Integer.parseInt(csvRecord.get(i));
+              String value = csvRecord.get(i);
+              // TODO handle cases like these better, for now, there's just one case in the WHO data.
+              int count;
+              if (value.equals("128(418)")) {
+                count = 418;
+              } else {
+                count = Integer.parseInt(value);
+              }
               LocalDate date = columnOrdinalToDates.get(i);
               ZonedDateTime utcDateTime = date.atStartOfDay(GENEVA);
               ppsRateLimiter.acquire();
