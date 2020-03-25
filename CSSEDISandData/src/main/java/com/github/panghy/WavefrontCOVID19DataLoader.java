@@ -103,6 +103,9 @@ public class WavefrontCOVID19DataLoader {
     while (true) {
       long start = System.currentTimeMillis();
       try {
+        // VMware FAH data
+        log.info("Processing VMware FAH Data: 52737");
+        fetchFAHData(wavefrontSender, ppsRateLimiter, httpClient, "52737");
         // JHU daily data v2
         LocalDate csvFileDate = LocalDate.of(2020, 3, 23);
         LocalDate today = LocalDate.now(UTC);
@@ -178,6 +181,74 @@ public class WavefrontCOVID19DataLoader {
       try (ObjectOutputStream out = new ObjectOutputStream(file)) {
         out.writeObject(cachedGeocodingResults);
       }
+    }
+  }
+
+  private void fetchFAHData(WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter, OkHttpClient httpClient,
+                            String team) {
+    try (Response response = httpClient.newCall(
+        new Request.Builder().url("https://api.foldingathome.org/team/" + team).get().build()).
+        execute()) {
+      if (response.code() != 200 || response.body() == null) {
+        log.log(Level.WARNING, "Cannot fetch FAH data: " + team + " " + response.code());
+      } else {
+        String body = response.body().string();
+        JsonNode jsonNode = OBJECT_MAPPER.readTree(body);
+        String name = jsonNode.get("name").asText();
+        long score = jsonNode.get("score").asLong();
+        long wus = jsonNode.get("wus").asLong();
+        long rank = jsonNode.get("rank").asLong();
+        long active50 = jsonNode.get("active_50").asLong();
+        long members = jsonNode.get("members").asLong();
+        Map<String, String> tags = new HashMap<>();
+        tags.put("version", "1");
+        tags.put("name", name);
+        tags.put("id", team);
+        ppsRateLimiter.acquire(5);
+        long time = System.currentTimeMillis();
+        wavefrontSender.sendMetric("fah.team." + team + ".score", score, time, "api.foldingathome.org", tags);
+        wavefrontSender.sendMetric("fah.team." + team + ".wus", wus, time, "api.foldingathome.org", tags);
+        wavefrontSender.sendMetric("fah.team." + team + ".rank", rank, time, "api.foldingathome.org", tags);
+        wavefrontSender.sendMetric("fah.team." + team + ".active50", active50, time, "api.foldingathome.org", tags);
+        wavefrontSender.sendMetric("fah.team." + team + ".members", members, time, "api.foldingathome.org", tags);
+      }
+    } catch (IOException e) {
+      log.log(Level.SEVERE, "Uncaught exception when processing FAH data for team: " + team, e);
+    }
+    try (Response response = httpClient.newCall(
+        new Request.Builder().url("https://api.foldingathome.org/team/" + team + "/members").get().build()).
+        execute()) {
+      if (response.code() != 200 || response.body() == null) {
+        log.log(Level.WARNING, "Cannot fetch FAH data for team members: " + team + " " + response.code());
+      } else {
+        String body = response.body().string();
+        JsonNode jsonNode = OBJECT_MAPPER.readTree(body);
+        long time = System.currentTimeMillis();
+        for (JsonNode child : jsonNode) {
+          String name = child.get(0).asText();
+          String id = child.get(1).asText();
+          if (name.equals("name") && id.equals("id")) continue;
+          long rank = child.get(2).asLong();
+          long score = child.get(3).asLong();
+          long wus = child.get(4).asLong();
+
+          if (isBlank(name)) {
+            name = "_blank_";
+          }
+
+          Map<String, String> tags = new HashMap<>();
+          tags.put("version", "1");
+          tags.put("name", name);
+          tags.put("team", team);
+          tags.put("id", id);
+          ppsRateLimiter.acquire(3);
+          wavefrontSender.sendMetric("fah.user." + name + ".score", score, time, "api.foldingathome.org", tags);
+          wavefrontSender.sendMetric("fah.user." + name + ".wus", wus, time, "api.foldingathome.org", tags);
+          wavefrontSender.sendMetric("fah.user." + name + ".rank", rank, time, "api.foldingathome.org", tags);
+        }
+      }
+    } catch (IOException e) {
+      log.log(Level.SEVERE, "Uncaught exception when processing FAH data for team members: " + team, e);
     }
   }
 
