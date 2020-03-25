@@ -12,7 +12,6 @@ import com.google.maps.model.AddressComponent;
 import com.google.maps.model.AddressComponentType;
 import com.google.maps.model.GeocodingResult;
 import com.google.maps.model.LatLng;
-import com.wavefront.sdk.common.Pair;
 import com.wavefront.sdk.common.WavefrontSender;
 import com.wavefront.sdk.direct.ingestion.WavefrontDirectIngestionClient;
 import okhttp3.OkHttpClient;
@@ -21,11 +20,11 @@ import okhttp3.Response;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
+import org.apache.commons.lang3.tuple.Pair;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.StringReader;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
@@ -58,6 +57,12 @@ public class WavefrontCOVID19DataLoader {
   @Parameter(names = "--historical")
   public boolean historical = false;
 
+  @Parameter(names = "--cachedGeocodingResults")
+  public String cachedGeocodingResultsFile = "geocoding_results.bin";
+
+  @Parameter(names = "--cachedReverseGeocodingResults")
+  public String cachedReverseGeocodingResultsFile = "reverse_geocoding_results.bin";
+
   private static final DateTimeFormatter MONTH_DAY_YEAR = DateTimeFormatter.ofPattern("M/d/[uuuu][uu]");
   private static final DateTimeFormatter MONTH_DAY_HOUR_MINUTE = new DateTimeFormatterBuilder()
       .appendPattern("M/d HH:mm")
@@ -81,6 +86,9 @@ public class WavefrontCOVID19DataLoader {
   }
 
   public void run() throws Exception {
+    // deserialize cached geocoding results.
+    loadCachedGeocodingResults();
+    // initialize clients
     OkHttpClient httpClient = new OkHttpClient.Builder().
         callTimeout(10, TimeUnit.SECONDS).
         connectTimeout(10, TimeUnit.SECONDS).
@@ -135,8 +143,41 @@ public class WavefrontCOVID19DataLoader {
       } catch (Exception ex) {
         log.log(Level.SEVERE, "Uncaught exception in run() loop", ex);
       }
-      log.info("Cycle Complete [" + (System.currentTimeMillis() - start) + "ms]");
-      Thread.sleep(TimeUnit.MINUTES.toMillis(5));
+      writeGeocodingResultsCacheFile();
+      long elapsed = System.currentTimeMillis() - start;
+      long toSleep = Math.max(0, TimeUnit.MINUTES.toMillis(5) - elapsed);
+      log.info("Cycle Complete [" + elapsed + "ms], sleeping for: " + toSleep + "ms");
+      Thread.sleep(toSleep);
+    }
+  }
+
+  private void loadCachedGeocodingResults() throws IOException, ClassNotFoundException {
+    if (Files.exists(Path.of(cachedGeocodingResultsFile))) {
+      try (FileInputStream file = new FileInputStream(cachedGeocodingResultsFile)) {
+        try (ObjectInputStream in = new ObjectInputStream(file)) {
+          cachedGeocodingResults.putAll((Map<String, GeocodingResult[]>) in.readObject());
+        }
+      }
+    }
+    if (Files.exists(Path.of(cachedReverseGeocodingResultsFile))) {
+      try (FileInputStream file = new FileInputStream(cachedReverseGeocodingResultsFile)) {
+        try (ObjectInputStream in = new ObjectInputStream(file)) {
+          cachedReverseGeocodingResults.putAll((Map<Pair<Double, Double>, AddressComponent[]>) in.readObject());
+        }
+      }
+    }
+  }
+
+  private void writeGeocodingResultsCacheFile() throws IOException {
+    try (FileOutputStream file = new FileOutputStream(cachedReverseGeocodingResultsFile)) {
+      try (ObjectOutputStream out = new ObjectOutputStream(file)) {
+        out.writeObject(cachedReverseGeocodingResults);
+      }
+    }
+    try (FileOutputStream file = new FileOutputStream(cachedGeocodingResultsFile)) {
+      try (ObjectOutputStream out = new ObjectOutputStream(file)) {
+        out.writeObject(cachedGeocodingResults);
+      }
     }
   }
 
@@ -266,7 +307,7 @@ public class WavefrontCOVID19DataLoader {
           LocalDateTime lastUpdate = LocalDateTime.parse(csvRecord.get("Last_Update"), JHU_TS_V2);
 
           AddressComponent[] addressComponents =
-              cachedReverseGeocodingResults.computeIfAbsent(new Pair<>(latitude, longitude), latlong -> {
+              cachedReverseGeocodingResults.computeIfAbsent(Pair.of(latitude, longitude), latlong -> {
                 GeocodingResult[] geocodingResults;
                 try {
                   geocodingResults = GeocodingApi.reverseGeocode(geoApiContext,
@@ -392,7 +433,7 @@ public class WavefrontCOVID19DataLoader {
           double latitude = Double.parseDouble(csvRecord.get(2));
           double longitude = Double.parseDouble(csvRecord.get(3));
           AddressComponent[] addressComponents =
-              cachedReverseGeocodingResults.computeIfAbsent(new Pair<>(latitude, longitude), latlong -> {
+              cachedReverseGeocodingResults.computeIfAbsent(Pair.of(latitude, longitude), latlong -> {
                 GeocodingResult[] geocodingResults;
                 try {
                   geocodingResults = GeocodingApi.reverseGeocode(geoApiContext,
@@ -784,10 +825,5 @@ public class WavefrontCOVID19DataLoader {
   private Optional<Long> jsonNodeToNumber(JsonNode node) {
     if (node.isNull()) return empty();
     return Optional.of(Long.parseLong(node.asText()));
-  }
-
-  private String iso2CountryCodeToIso3CountryCode(String iso2CountryCode) {
-    Locale locale = new Locale("", iso2CountryCode);
-    return locale.getISO3Country();
   }
 }
