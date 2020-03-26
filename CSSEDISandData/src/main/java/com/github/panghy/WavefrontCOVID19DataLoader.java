@@ -113,7 +113,8 @@ public class WavefrontCOVID19DataLoader {
           String file = JHU_DAILY_FILE_FORMAT.format(csvFileDate) + ".csv";
           log.info("Processing JHU Daily: " + file);
           fetchAndProcessDailyCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
-              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/" + file);
+              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/" + file,
+              "");
           csvFileDate = csvFileDate.plusDays(1);
         }
         log.info("Processing JHU Aggregated (until 3/22/2020)");
@@ -354,7 +355,7 @@ public class WavefrontCOVID19DataLoader {
 
   private void fetchAndProcessDailyCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
                                             WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter,
-                                            String url) {
+                                            String url, String prefix) {
     try (Response response = httpClient.newCall(
         new Request.Builder().url(url).get().build()).
         execute()) {
@@ -363,7 +364,7 @@ public class WavefrontCOVID19DataLoader {
       } else {
         String body = response.body().string();
         CSVParser records = CSVFormat.RFC4180.withFirstRecordAsHeader().withAllowMissingColumnNames().
-            parse(new StringReader(body));
+            withTrim().parse(new StringReader(body));
         for (CSVRecord csvRecord : records) {
           String fips = csvRecord.get("FIPS");
           String admin2 = csvRecord.get("Admin2");
@@ -371,11 +372,77 @@ public class WavefrontCOVID19DataLoader {
           String countryRegion = csvRecord.get("Country_Region");
           double latitude = Double.parseDouble(csvRecord.get("Lat"));
           double longitude = Double.parseDouble(csvRecord.get("Long_"));
+          Map<String, String> tags = new HashMap<>();
+          tags.put("version", "5");
+          if (latitude != 0) {
+            tags.put("lat", String.valueOf(latitude));
+          }
+          if (longitude != 0) {
+            tags.put("long", String.valueOf(longitude));
+          }
+          if (isNotBlank(fips)) {
+            tags.put("fips", fips);
+          }
           long confirmed = Long.parseLong(csvRecord.get("Confirmed"));
           long deaths = Long.parseLong(csvRecord.get("Deaths"));
           long recovered = Long.parseLong(csvRecord.get("Recovered"));
           long active = Long.parseLong(csvRecord.get("Active"));
           LocalDateTime lastUpdate = LocalDateTime.parse(csvRecord.get("Last_Update"), JHU_TS_V2);
+          ZonedDateTime utcDateTime = lastUpdate.atZone(UTC);
+
+          if (countryRegion.equals("US")) {
+            tags.put("csse_country", countryRegion);
+            tags.put("country", "United States");
+            tags.put("country_short", "US");
+            // special cases for US in the JHU data.
+            if (isBlank(fips)) {
+              if (latitude == 0 && longitude == 0) {
+                if (provinceState.equals("Recovered")) {
+                  tags.put("classifier", "Recovered");
+                  wavefrontSender.sendMetric(prefix + "csse.recovered", recovered, utcDateTime.toEpochSecond(), "csse",
+                      tags);
+                } else if (admin2.equals("Unassigned")) {
+                  tags.put("csse_admin2", admin2);
+                  tags.put("csse_province", provinceState);
+                  GeocodingResult[] geocodingResult = cachedGeocodingResults.computeIfAbsent(provinceState + ", US",
+                      key -> {
+                        try {
+                          return GeocodingApi.geocode(geoApiContext, key).await();
+                        } catch (ApiException | InterruptedException | IOException e) {
+                          throw new RuntimeException(e);
+                        }
+                      });
+                  if (provinceState.equals("Wuhan Evacuee")) {
+                    tags.put("classifier", "Wuhan Evacuee");
+                  } else {
+                    tags.put("csse_admin2", admin2);
+                    tags.put("admin2", "Unassigned");
+                    Optional<AddressComponent> geocodedProvince = Arrays.stream(geocodingResult[0].addressComponents).
+                        filter(ac -> Arrays.stream(ac.types).anyMatch(act ->
+                            act == AddressComponentType.ADMINISTRATIVE_AREA_LEVEL_1)).
+                        findFirst();
+                    if (geocodedProvince.isPresent()) {
+                      if (isBlank(geocodedProvince.get().longName)) {
+                        tags.put("province_state", provinceState);
+                      } else {
+                        tags.put("province_state", geocodedProvince.get().longName);
+                      }
+                      if (isNotBlank(geocodedProvince.get().shortName)) {
+                        tags.put("province_state_short", geocodedProvince.get().shortName);
+                      }
+                    } else {
+                      tags.put("province_state", provinceState);
+                    }
+                  }
+                  reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
+                      utcDateTime);
+                }
+                continue;
+              } else {
+                // we can still geocode if we have a lat/long
+              }
+            }
+          }
 
           AddressComponent[] addressComponents =
               cachedReverseGeocodingResults.computeIfAbsent(Pair.of(latitude, longitude), latlong -> {
@@ -392,7 +459,6 @@ public class WavefrontCOVID19DataLoader {
                   return geocodingResults[0].addressComponents;
                 }
               });
-          Map<String, String> tags = new HashMap<>();
           // country
           if (!isBlank(countryRegion)) {
             tags.put("csse_country", countryRegion);
@@ -453,27 +519,23 @@ public class WavefrontCOVID19DataLoader {
               tags.put("admin2", provinceState);
             }
           }
-          tags.put("version", "4");
-          tags.put("lat", String.valueOf(latitude));
-          tags.put("long", String.valueOf(longitude));
-          if (isNotBlank(fips)) {
-            tags.put("fips", fips);
-          }
-          ZonedDateTime utcDateTime = lastUpdate.atZone(UTC);
-          ppsRateLimiter.acquire(4);
-          wavefrontSender.sendMetric("csse.confirmed_cases", confirmed, utcDateTime.toEpochSecond(), "csse",
-              tags);
-          wavefrontSender.sendMetric("csse.deaths", deaths, utcDateTime.toEpochSecond(), "csse",
-              tags);
-          wavefrontSender.sendMetric("csse.recovered", recovered, utcDateTime.toEpochSecond(), "csse",
-              tags);
-          wavefrontSender.sendMetric("csse.active", active, utcDateTime.toEpochSecond(), "csse",
-              tags);
+          reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
+              utcDateTime);
         }
       }
     } catch (Exception ex) {
       log.log(Level.SEVERE, "Uncaught exception when processing CSSE data for: " + url, ex);
     }
+  }
+
+  private void reportCSSEData(WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter, String prefix,
+                              Map<String, String> tags, long confirmed, long deaths, long recovered, long active,
+                              ZonedDateTime utcDateTime) throws IOException {
+    ppsRateLimiter.acquire(4);
+    wavefrontSender.sendMetric(prefix + "csse.confirmed_cases", confirmed, utcDateTime.toEpochSecond(), "csse", tags);
+    wavefrontSender.sendMetric(prefix + "csse.deaths", deaths, utcDateTime.toEpochSecond(), "csse", tags);
+    wavefrontSender.sendMetric(prefix + "csse.recovered", recovered, utcDateTime.toEpochSecond(), "csse", tags);
+    wavefrontSender.sendMetric(prefix + "csse.active", active, utcDateTime.toEpochSecond(), "csse", tags);
   }
 
   private void fetchAndProcessCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
@@ -556,7 +618,7 @@ public class WavefrontCOVID19DataLoader {
               tags.put("province_state", provinceState);
             }
           }
-          tags.put("version", "4");
+          tags.put("version", "5");
           tags.put("lat", String.valueOf(latitude));
           tags.put("long", String.valueOf(longitude));
           for (int i = 4; i < csvRecord.size(); i++) {
