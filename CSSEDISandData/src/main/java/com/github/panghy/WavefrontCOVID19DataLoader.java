@@ -117,17 +117,19 @@ public class WavefrontCOVID19DataLoader {
               "");
           csvFileDate = csvFileDate.plusDays(1);
         }
-        log.info("Processing JHU Aggregated (until 3/22/2020)");
-        // JHU CSSE data until 3/22 (3/23 switches to the new data).
-        fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
-            "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv",
-            "confirmed_cases");
-        fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
-            "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv",
-            "deaths");
-        fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
-            "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Recovered.csv",
-            "recovered");
+        if (historical) {
+          log.info("Processing JHU Aggregated (until 3/22/2020)");
+          // JHU CSSE data until 3/22 (3/23 switches to the new data).
+          fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
+              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv",
+              "confirmed_cases");
+          fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
+              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv",
+              "deaths");
+          fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
+              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Recovered.csv",
+              "recovered");
+        }
         log.info("Processing worldometer.info stats");
         // worldometer.info world stats
         injectCountryStats(geoApiContext, wavefrontSender, ppsRateLimiter, historical);
@@ -763,7 +765,7 @@ public class WavefrontCOVID19DataLoader {
           Optional<Long> negative = jsonNodeToNumber(stateNode.get("negative"));
           Optional<Long> pending = jsonNodeToNumber(stateNode.get("pending"));
           Optional<Long> death = jsonNodeToNumber(stateNode.get("death"));
-          Optional<Long> total = jsonNodeToNumber(stateNode.get("total"));
+          Optional<Long> totalTestResults = jsonNodeToNumber(stateNode.get("totalTestResults"));
           Optional<Long> hospitalized = jsonNodeToNumber(stateNode.get("hospitalized"));
           Optional<Long> score = stateNode.has("score") ? jsonNodeToNumber(stateNode.get("score")) : empty();
           ZonedDateTime checkTimeEt = LocalDateTime.parse(stateNode.get("checkTimeEt").asText(), MONTH_DAY_HOUR_MINUTE).
@@ -822,8 +824,9 @@ public class WavefrontCOVID19DataLoader {
             if (death.isPresent()) {
               wavefrontSender.sendMetric("com.covidtracking.death", death.get(), timestamp, "covidtracking.com", tags);
             }
-            if (total.isPresent()) {
-              wavefrontSender.sendMetric("com.covidtracking.total", total.get(), timestamp, "covidtracking.com", tags);
+            if (totalTestResults.isPresent()) {
+              wavefrontSender.sendMetric("com.covidtracking.total", totalTestResults.get(), timestamp,
+                  "covidtracking.com", tags);
             }
             if (hospitalized.isPresent()) {
               wavefrontSender.sendMetric("com.covidtracking.hospitalized", hospitalized.get(), timestamp,
@@ -956,7 +959,7 @@ public class WavefrontCOVID19DataLoader {
   }
 
   private Optional<Long> jsonNodeToNumber(JsonNode node) {
-    if (node.isNull()) return empty();
+    if (node == null || node.isNull()) return empty();
     return Optional.of(Long.parseLong(node.asText()));
   }
 }
