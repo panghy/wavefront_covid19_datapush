@@ -100,6 +100,9 @@ public class WavefrontCOVID19DataLoader {
     WavefrontSender wavefrontSender = new WavefrontDirectIngestionClient.Builder(wavefrontUrl, wavefrontToken).
         maxQueueSize(1_000_000).build();
     RateLimiter ppsRateLimiter = RateLimiter.create(flushPPS);
+    // used during testing.
+    String metricPrefix = "";
+    String csseDataVersion = "v5";
     while (true) {
       long start = System.currentTimeMillis();
       try {
@@ -114,22 +117,20 @@ public class WavefrontCOVID19DataLoader {
           log.info("Processing JHU Daily: " + file);
           fetchAndProcessDailyCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
               "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/" + file,
-              "");
+              metricPrefix, csseDataVersion);
           csvFileDate = csvFileDate.plusDays(1);
         }
-        if (historical) {
-          log.info("Processing JHU Aggregated (until 3/22/2020)");
-          // JHU CSSE data until 3/22 (3/23 switches to the new data).
-          fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
-              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv",
-              "confirmed_cases");
-          fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
-              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv",
-              "deaths");
-          fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
-              "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Recovered.csv",
-              "recovered");
-        }
+        log.info("Processing JHU Aggregated (until 3/22/2020)");
+        // JHU CSSE data until 3/22 (3/23 switches to the new data).
+        fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
+            "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/203881b83c3820521f5af7cafb0d15367e415652/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv",
+            "confirmed_cases", metricPrefix, csseDataVersion);
+        fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
+            "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/203881b83c3820521f5af7cafb0d15367e415652/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv",
+            "deaths", metricPrefix, csseDataVersion);
+        fetchAndProcessCSSEData(httpClient, geoApiContext, wavefrontSender, ppsRateLimiter,
+            "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/203881b83c3820521f5af7cafb0d15367e415652/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Recovered.csv",
+            "recovered", metricPrefix, csseDataVersion);
         log.info("Processing worldometer.info stats");
         // worldometer.info world stats
         injectCountryStats(geoApiContext, wavefrontSender, ppsRateLimiter, historical);
@@ -357,7 +358,7 @@ public class WavefrontCOVID19DataLoader {
 
   private void fetchAndProcessDailyCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
                                             WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter,
-                                            String url, String prefix) {
+                                            String url, String prefix, String csseDataVersion) {
     try (Response response = httpClient.newCall(
         new Request.Builder().url(url).get().build()).
         execute()) {
@@ -372,10 +373,9 @@ public class WavefrontCOVID19DataLoader {
           String admin2 = csvRecord.get("Admin2");
           String provinceState = csvRecord.get("Province_State");
           String countryRegion = csvRecord.get("Country_Region");
-          double latitude = Double.parseDouble(csvRecord.get("Lat"));
-          double longitude = Double.parseDouble(csvRecord.get("Long_"));
+          double latitude = isNotBlank(csvRecord.get("Lat")) ? Double.parseDouble(csvRecord.get("Lat")) : 0;
+          double longitude = isNotBlank(csvRecord.get("Long_")) ? Double.parseDouble(csvRecord.get("Long_")) : 0;
           Map<String, String> tags = new HashMap<>();
-          tags.put("version", "5");
           if (latitude != 0) {
             tags.put("lat", String.valueOf(latitude));
           }
@@ -401,8 +401,8 @@ public class WavefrontCOVID19DataLoader {
               if (latitude == 0 && longitude == 0) {
                 if (provinceState.equals("Recovered")) {
                   tags.put("classifier", "Recovered");
-                  wavefrontSender.sendMetric(prefix + "csse.recovered", recovered, utcDateTime.toEpochSecond(), "csse",
-                      tags);
+                  wavefrontSender.sendMetric(prefix + "csse." + csseDataVersion + ".recovered", recovered,
+                      utcDateTime.toEpochSecond(), "csse", tags);
                 } else if (admin2.equals("Unassigned")) {
                   tags.put("csse_admin2", admin2);
                   tags.put("csse_province", provinceState);
@@ -437,7 +437,7 @@ public class WavefrontCOVID19DataLoader {
                     }
                   }
                   reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
-                      utcDateTime);
+                      utcDateTime, csseDataVersion);
                 }
                 continue;
               } else {
@@ -522,7 +522,7 @@ public class WavefrontCOVID19DataLoader {
             }
           }
           reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
-              utcDateTime);
+              utcDateTime, "v5");
         }
       }
     } catch (Exception ex) {
@@ -532,17 +532,17 @@ public class WavefrontCOVID19DataLoader {
 
   private void reportCSSEData(WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter, String prefix,
                               Map<String, String> tags, long confirmed, long deaths, long recovered, long active,
-                              ZonedDateTime utcDateTime) throws IOException {
+                              ZonedDateTime utcDateTime, String version) throws IOException {
     ppsRateLimiter.acquire(4);
-    wavefrontSender.sendMetric(prefix + "csse.confirmed_cases", confirmed, utcDateTime.toEpochSecond(), "csse", tags);
-    wavefrontSender.sendMetric(prefix + "csse.deaths", deaths, utcDateTime.toEpochSecond(), "csse", tags);
-    wavefrontSender.sendMetric(prefix + "csse.recovered", recovered, utcDateTime.toEpochSecond(), "csse", tags);
-    wavefrontSender.sendMetric(prefix + "csse.active", active, utcDateTime.toEpochSecond(), "csse", tags);
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".confirmed_cases", confirmed, utcDateTime.toEpochSecond(), "csse", tags);
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".deaths", deaths, utcDateTime.toEpochSecond(), "csse", tags);
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".recovered", recovered, utcDateTime.toEpochSecond(), "csse", tags);
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".active", active, utcDateTime.toEpochSecond(), "csse", tags);
   }
 
   private void fetchAndProcessCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
                                        WavefrontSender wavefrontSender, RateLimiter ppsRateLimiter,
-                                       String url, String context) {
+                                       String url, String context, String prefix, String version) {
     try (Response response = httpClient.newCall(
         new Request.Builder().url(url).get().build()).
         execute()) {
@@ -620,7 +620,6 @@ public class WavefrontCOVID19DataLoader {
               tags.put("province_state", provinceState);
             }
           }
-          tags.put("version", "5");
           tags.put("lat", String.valueOf(latitude));
           tags.put("long", String.valueOf(longitude));
           for (int i = 4; i < csvRecord.size(); i++) {
@@ -634,7 +633,7 @@ public class WavefrontCOVID19DataLoader {
               }
               ZonedDateTime utcDateTime = date.atStartOfDay(UTC);
               ppsRateLimiter.acquire();
-              wavefrontSender.sendMetric("csse." + context, count, utcDateTime.toEpochSecond(), "csse", tags);
+              wavefrontSender.sendMetric(prefix + "csse." + version + "." + context, count, utcDateTime.toEpochSecond(), "csse", tags);
             }
           }
         }
