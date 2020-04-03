@@ -102,7 +102,7 @@ public class WavefrontCOVID19DataLoader {
     RateLimiter ppsRateLimiter = RateLimiter.create(flushPPS);
     // used during testing.
     String metricPrefix = "";
-    String csseDataVersion = "v5";
+    String csseDataVersion = "v6";
     while (true) {
       long start = System.currentTimeMillis();
       try {
@@ -397,52 +397,53 @@ public class WavefrontCOVID19DataLoader {
             tags.put("country", "United States");
             tags.put("country_short", "US");
             // special cases for US in the JHU data.
-            if (isBlank(fips)) {
-              if (latitude == 0 && longitude == 0) {
-                if (provinceState.equals("Recovered")) {
-                  tags.put("classifier", "Recovered");
-                  wavefrontSender.sendMetric(prefix + "csse." + csseDataVersion + ".recovered", recovered,
-                      utcDateTime.toEpochSecond(), "csse", tags);
-                } else if (admin2.equals("Unassigned")) {
-                  tags.put("csse_admin2", admin2);
-                  tags.put("csse_province", provinceState);
-                  GeocodingResult[] geocodingResult = cachedGeocodingResults.computeIfAbsent(provinceState + ", US",
-                      key -> {
-                        try {
-                          return GeocodingApi.geocode(geoApiContext, key).await();
-                        } catch (ApiException | InterruptedException | IOException e) {
-                          throw new RuntimeException(e);
-                        }
-                      });
-                  if (provinceState.equals("Wuhan Evacuee")) {
-                    tags.put("classifier", "Wuhan Evacuee");
-                  } else {
-                    tags.put("csse_admin2", admin2);
-                    tags.put("admin2", "Unassigned");
-                    Optional<AddressComponent> geocodedProvince = Arrays.stream(geocodingResult[0].addressComponents).
-                        filter(ac -> Arrays.stream(ac.types).anyMatch(act ->
-                            act == AddressComponentType.ADMINISTRATIVE_AREA_LEVEL_1)).
-                        findFirst();
-                    if (geocodedProvince.isPresent()) {
-                      if (isBlank(geocodedProvince.get().longName)) {
-                        tags.put("province_state", provinceState);
-                      } else {
-                        tags.put("province_state", geocodedProvince.get().longName);
-                      }
-                      if (isNotBlank(geocodedProvince.get().shortName)) {
-                        tags.put("province_state_short", geocodedProvince.get().shortName);
-                      }
-                    } else {
-                      tags.put("province_state", provinceState);
-                    }
-                  }
-                  reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
-                      utcDateTime, csseDataVersion);
-                }
-                continue;
+            if (latitude == 0 && longitude == 0) {
+              if (provinceState.equals("Recovered")) {
+                tags.put("classifier", "Recovered");
+                wavefrontSender.sendMetric(prefix + "csse." + csseDataVersion + ".recovered", recovered,
+                    utcDateTime.toEpochSecond(), "csse", tags);
               } else {
-                // we can still geocode if we have a lat/long
+                tags.put("csse_province", provinceState);
+                if (isNotBlank(admin2)) {
+                  tags.put("csse_admin2", admin2);
+                  tags.put("admin2", admin2);
+                }
+                GeocodingResult[] geocodingResult = cachedGeocodingResults.computeIfAbsent(provinceState + ", US",
+                    key -> {
+                      try {
+                        return GeocodingApi.geocode(geoApiContext, key).await();
+                      } catch (ApiException | InterruptedException | IOException e) {
+                        throw new RuntimeException(e);
+                      }
+                    });
+                if (provinceState.equals("Wuhan Evacuee")) {
+                  tags.put("classifier", "Wuhan Evacuee");
+                } else if (provinceState.equals("Diamond Princess")) {
+                  tags.put("classifier", "Diamond Princess");
+                } else if (provinceState.equals("Grand Princess")) {
+                  tags.put("classifier", "Grand Princess");
+                } else {
+                  Optional<AddressComponent> geocodedProvince = Arrays.stream(geocodingResult[0].addressComponents).
+                      filter(ac -> Arrays.stream(ac.types).anyMatch(act ->
+                          act == AddressComponentType.ADMINISTRATIVE_AREA_LEVEL_1)).
+                      findFirst();
+                  if (geocodedProvince.isPresent()) {
+                    if (isBlank(geocodedProvince.get().longName)) {
+                      tags.put("province_state", provinceState);
+                    } else {
+                      tags.put("province_state", geocodedProvince.get().longName);
+                    }
+                    if (isNotBlank(geocodedProvince.get().shortName)) {
+                      tags.put("province_state_short", geocodedProvince.get().shortName);
+                    }
+                  } else {
+                    tags.put("province_state", provinceState);
+                  }
+                }
+                reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
+                    utcDateTime, csseDataVersion);
               }
+              continue;
             }
           }
 
@@ -521,8 +522,12 @@ public class WavefrontCOVID19DataLoader {
               tags.put("admin2", provinceState);
             }
           }
-          reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
-              utcDateTime, "v5");
+          if (tags.get("country").equals("US")) {
+            log.info(csvRecord.toString());
+          } else {
+            reportCSSEData(wavefrontSender, ppsRateLimiter, prefix, tags, confirmed, deaths, recovered, active,
+                utcDateTime, csseDataVersion);
+          }
         }
       }
     } catch (Exception ex) {
