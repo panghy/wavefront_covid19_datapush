@@ -202,8 +202,6 @@ public class WavefrontCOVID19DataLoader {
         long score = jsonNode.get("score").asLong();
         long wus = jsonNode.get("wus").asLong();
         long rank = jsonNode.get("rank").asLong();
-        long active50 = jsonNode.get("active_50").asLong();
-        long members = jsonNode.get("members").asLong();
         Map<String, String> tags = new HashMap<>();
         tags.put("version", "1");
         tags.put("name", name);
@@ -213,10 +211,8 @@ public class WavefrontCOVID19DataLoader {
         wavefrontSender.sendMetric("fah.team." + team + ".score", score, time, "api.foldingathome.org", tags);
         wavefrontSender.sendMetric("fah.team." + team + ".wus", wus, time, "api.foldingathome.org", tags);
         wavefrontSender.sendMetric("fah.team." + team + ".rank", rank, time, "api.foldingathome.org", tags);
-        wavefrontSender.sendMetric("fah.team." + team + ".active50", active50, time, "api.foldingathome.org", tags);
-        wavefrontSender.sendMetric("fah.team." + team + ".members", members, time, "api.foldingathome.org", tags);
       }
-    } catch (IOException e) {
+    } catch (Throwable e) {
       log.log(Level.SEVERE, "Uncaught exception when processing FAH data for team: " + team, e);
     }
     try (Response response = httpClient.newCall(
@@ -251,7 +247,7 @@ public class WavefrontCOVID19DataLoader {
           wavefrontSender.sendMetric("fah.user." + name + ".rank", rank, time, "api.foldingathome.org", tags);
         }
       }
-    } catch (IOException e) {
+    } catch (Throwable e) {
       log.log(Level.SEVERE, "Uncaught exception when processing FAH data for team members: " + team, e);
     }
   }
