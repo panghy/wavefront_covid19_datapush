@@ -102,7 +102,7 @@ public class WavefrontCOVID19DataLoader {
     RateLimiter ppsRateLimiter = RateLimiter.create(flushPPS);
     // used during testing.
     String metricPrefix = "";
-    String csseDataVersion = "v6";
+    String csseDataVersion = "v7";
     while (true) {
       long start = System.currentTimeMillis();
       try {
@@ -535,10 +535,21 @@ public class WavefrontCOVID19DataLoader {
                               Map<String, String> tags, long confirmed, long deaths, long recovered, long active,
                               ZonedDateTime utcDateTime, String version) throws IOException {
     ppsRateLimiter.acquire(4);
-    wavefrontSender.sendMetric(prefix + "csse." + version + ".confirmed_cases", confirmed, utcDateTime.toEpochSecond(), "csse", tags);
-    wavefrontSender.sendMetric(prefix + "csse." + version + ".deaths", deaths, utcDateTime.toEpochSecond(), "csse", tags);
-    wavefrontSender.sendMetric(prefix + "csse." + version + ".recovered", recovered, utcDateTime.toEpochSecond(), "csse", tags);
-    wavefrontSender.sendMetric(prefix + "csse." + version + ".active", active, utcDateTime.toEpochSecond(), "csse", tags);
+    String host = "csse.";
+    host = appendToHost(tags, host, "csse_country");
+    host = appendToHost(tags, host, "csse_province");
+    host = appendToHost(tags, host, "csse_admin2");
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".confirmed_cases", confirmed, utcDateTime.toEpochSecond(), host, tags);
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".deaths", deaths, utcDateTime.toEpochSecond(), host, tags);
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".recovered", recovered, utcDateTime.toEpochSecond(), host, tags);
+    wavefrontSender.sendMetric(prefix + "csse." + version + ".active", active, utcDateTime.toEpochSecond(), host, tags);
+  }
+
+  private String appendToHost(Map<String, String> tags, String host, String key) {
+    if (tags.containsKey(key) && isNotBlank(tags.get(key))) {
+      host += tags.get(key) + ".";
+    }
+    return host;
   }
 
   private void fetchAndProcessCSSEData(OkHttpClient httpClient, GeoApiContext geoApiContext,
