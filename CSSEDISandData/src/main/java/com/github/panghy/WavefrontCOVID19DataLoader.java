@@ -22,12 +22,14 @@ import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
 import org.apache.commons.lang3.tuple.Pair;
 
+import javax.annotation.Nonnull;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoField;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -69,6 +71,7 @@ public class WavefrontCOVID19DataLoader {
       .parseDefaulting(ChronoField.YEAR, 2020)
       .toFormatter(Locale.ENGLISH);
   private static final DateTimeFormatter JHU_TS_V2 = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
+  private static final DateTimeFormatter JHU_TS_V2_1 = DateTimeFormatter.ofPattern("M/d/uu H:mm[:ss]");
   private static final DateTimeFormatter JHU_DAILY_FILE_FORMAT = DateTimeFormatter.ofPattern("MM-dd-uuuu");
 
   private static final ZoneId UTC = ZoneId.of("UTC");
@@ -102,7 +105,7 @@ public class WavefrontCOVID19DataLoader {
     RateLimiter ppsRateLimiter = RateLimiter.create(flushPPS);
     // used during testing.
     String metricPrefix = "";
-    String csseDataVersion = "v7";
+    String csseDataVersion = "v8";
     while (true) {
       long start = System.currentTimeMillis();
       try {
@@ -385,7 +388,7 @@ public class WavefrontCOVID19DataLoader {
           long deaths = Long.parseLong(csvRecord.get("Deaths"));
           long recovered = Long.parseLong(csvRecord.get("Recovered"));
           long active = Long.parseLong(csvRecord.get("Active"));
-          LocalDateTime lastUpdate = LocalDateTime.parse(csvRecord.get("Last_Update"), JHU_TS_V2);
+          LocalDateTime lastUpdate = parseCSSEDateTime(csvRecord.get("Last_Update"));
           ZonedDateTime utcDateTime = lastUpdate.atZone(UTC);
 
           if (countryRegion.equals("US")) {
@@ -528,6 +531,15 @@ public class WavefrontCOVID19DataLoader {
       }
     } catch (Exception ex) {
       log.log(Level.SEVERE, "Uncaught exception when processing CSSE data for: " + url, ex);
+    }
+  }
+
+  @Nonnull
+  private LocalDateTime parseCSSEDateTime(String dateTimeString) {
+    try {
+      return LocalDateTime.parse(dateTimeString, JHU_TS_V2);
+    } catch (DateTimeParseException ex) {
+      return LocalDateTime.parse(dateTimeString, JHU_TS_V2_1);
     }
   }
 
