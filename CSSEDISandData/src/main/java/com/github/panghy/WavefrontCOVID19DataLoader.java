@@ -105,7 +105,7 @@ public class WavefrontCOVID19DataLoader {
     RateLimiter ppsRateLimiter = RateLimiter.create(flushPPS);
     // used during testing.
     String metricPrefix = "";
-    String csseDataVersion = "v8";
+    String csseDataVersion = "v9";
     while (true) {
       long start = System.currentTimeMillis();
       try {
@@ -113,7 +113,7 @@ public class WavefrontCOVID19DataLoader {
         log.info("Processing VMware FAH Data: 52737");
         fetchFAHData(wavefrontSender, ppsRateLimiter, httpClient, "52737");
         // JHU daily data v2
-        LocalDate csvFileDate = LocalDate.of(2020, 3, 23);
+        LocalDate csvFileDate = LocalDate.of(2020, 3, 22);
         LocalDate today = LocalDate.now(UTC);
         while (!csvFileDate.isAfter(today)) {
           String file = JHU_DAILY_FILE_FORMAT.format(csvFileDate) + ".csv";
@@ -283,13 +283,6 @@ public class WavefrontCOVID19DataLoader {
               findFirst();
           if (geocodedCountry.isPresent()) {
             Map<String, String> tags = new HashMap<>();
-            if (firstResult.geometry != null) {
-              LatLng location = firstResult.geometry.location;
-              if (location != null) {
-                tags.put("lat", String.valueOf(location.lat));
-                tags.put("long", String.valueOf(location.lng));
-              }
-            }
             tags.put("version", "1");
             if (isNotBlank(geocodedCountry.get().longName)) {
               tags.put("country", geocodedCountry.get().longName);
@@ -375,13 +368,8 @@ public class WavefrontCOVID19DataLoader {
           double latitude = isNotBlank(csvRecord.get("Lat")) ? Double.parseDouble(csvRecord.get("Lat")) : 0;
           double longitude = isNotBlank(csvRecord.get("Long_")) ? Double.parseDouble(csvRecord.get("Long_")) : 0;
           Map<String, String> tags = new HashMap<>();
-          if (latitude != 0) {
-            tags.put("lat", String.valueOf(latitude));
-          }
-          if (longitude != 0) {
-            tags.put("long", String.valueOf(longitude));
-          }
-          if (isNotBlank(fips)) {
+          // only add FIPS for US.
+          if (isNotBlank(fips) && countryRegion.equals("US")) {
             tags.put("fips", fips);
           }
           long confirmed = Long.parseLong(csvRecord.get("Confirmed"));
@@ -644,8 +632,6 @@ public class WavefrontCOVID19DataLoader {
               tags.put("province_state", provinceState);
             }
           }
-          tags.put("lat", String.valueOf(latitude));
-          tags.put("long", String.valueOf(longitude));
           for (int i = 4; i < csvRecord.size(); i++) {
             if (columnOrdinalToDates.containsKey(i) && !isBlank(csvRecord.get(i))) {
               int count = Integer.parseInt(csvRecord.get(i));
@@ -709,13 +695,6 @@ public class WavefrontCOVID19DataLoader {
           Map<String, String> tags = new HashMap<>();
           if (geocodingResult.length > 0) {
             GeocodingResult firstResult = geocodingResult[0];
-            if (firstResult.geometry != null) {
-              LatLng location = firstResult.geometry.location;
-              if (location != null) {
-                tags.put("lat", String.valueOf(location.lat));
-                tags.put("long", String.valueOf(location.lng));
-              }
-            }
             if (firstResult.addressComponents != null && firstResult.addressComponents.length > 0) {
               Optional<AddressComponent> geocodedCountry = Arrays.stream(firstResult.addressComponents).
                   filter(ac -> Arrays.stream(ac.types).anyMatch(act -> act == AddressComponentType.COUNTRY)).
@@ -798,13 +777,6 @@ public class WavefrontCOVID19DataLoader {
           tags.put("state_short", stateCode);
           if (geocodingResult.length > 0) {
             GeocodingResult firstResult = geocodingResult[0];
-            if (firstResult.geometry != null) {
-              LatLng location = firstResult.geometry.location;
-              if (location != null) {
-                tags.put("lat", String.valueOf(location.lat));
-                tags.put("long", String.valueOf(location.lng));
-              }
-            }
             if (firstResult.addressComponents != null && firstResult.addressComponents.length > 0) {
               Optional<AddressComponent> geocodedCountry = Arrays.stream(firstResult.addressComponents).
                   filter(ac -> Arrays.stream(ac.types).anyMatch(act -> act == AddressComponentType.COUNTRY)).
@@ -888,13 +860,6 @@ public class WavefrontCOVID19DataLoader {
           tags.put("state_short", stateCode);
           if (geocodingResult.length > 0) {
             GeocodingResult firstResult = geocodingResult[0];
-            if (firstResult.geometry != null) {
-              LatLng location = firstResult.geometry.location;
-              if (location != null) {
-                tags.put("lat", String.valueOf(location.lat));
-                tags.put("long", String.valueOf(location.lng));
-              }
-            }
             if (firstResult.addressComponents != null && firstResult.addressComponents.length > 0) {
               Optional<AddressComponent> geocodedCountry = Arrays.stream(firstResult.addressComponents).
                   filter(ac -> Arrays.stream(ac.types).anyMatch(act -> act == AddressComponentType.COUNTRY)).
