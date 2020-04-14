@@ -105,7 +105,7 @@ public class WavefrontCOVID19DataLoader {
     RateLimiter ppsRateLimiter = RateLimiter.create(flushPPS);
     // used during testing.
     String metricPrefix = "";
-    String csseDataVersion = "v9";
+    String csseDataVersion = "v10";
     while (true) {
       long start = System.currentTimeMillis();
       try {
@@ -643,7 +643,11 @@ public class WavefrontCOVID19DataLoader {
               }
               ZonedDateTime utcDateTime = date.atStartOfDay(UTC);
               ppsRateLimiter.acquire();
-              wavefrontSender.sendMetric(prefix + "csse." + version + "." + context, count, utcDateTime.toEpochSecond(), "csse", tags);
+              String host = "csse.";
+              host = appendToHost(tags, host, "csse_country");
+              host = appendToHost(tags, host, "csse_province");
+              host = appendToHost(tags, host, "csse_admin2");
+              wavefrontSender.sendMetric(prefix + "csse." + version + "." + context, count, utcDateTime.toEpochSecond(), host, tags);
             }
           }
         }
