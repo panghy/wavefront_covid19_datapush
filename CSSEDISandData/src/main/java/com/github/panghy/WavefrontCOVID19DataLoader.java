@@ -675,7 +675,12 @@ public class WavefrontCOVID19DataLoader {
         for (int i = 3; i < headerNames.size(); i++) {
           String dateHeader = headerNames.get(i);
           if (!isBlank(dateHeader)) {
-            LocalDate date = LocalDate.parse(dateHeader, MONTH_DAY_YEAR);
+            LocalDate date;
+            if (dateHeader.equals("19-Apr")) {
+              date = LocalDate.of(2020, 4, 19);
+            } else {
+              date = LocalDate.parse(dateHeader, MONTH_DAY_YEAR);
+            }
             columnOrdinalToDates.put(i, date);
           }
         }
