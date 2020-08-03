@@ -372,10 +372,10 @@ public class WavefrontCOVID19DataLoader {
           if (isNotBlank(fips) && countryRegion.equals("US")) {
             tags.put("fips", fips);
           }
-          long confirmed = Long.parseLong(csvRecord.get("Confirmed"));
-          long deaths = Long.parseLong(csvRecord.get("Deaths"));
-          long recovered = Long.parseLong(csvRecord.get("Recovered"));
-          long active = Long.parseLong(csvRecord.get("Active"));
+          long confirmed = isBlank(csvRecord.get("Confirmed")) ? 0 : Long.parseLong(csvRecord.get("Confirmed"));
+          long deaths = isBlank(csvRecord.get("Deaths")) ? 0 : Long.parseLong(csvRecord.get("Deaths"));
+          long recovered = isBlank(csvRecord.get("Recovered")) ? 0 : Long.parseLong(csvRecord.get("Recovered"));
+          long active = isBlank(csvRecord.get("Active")) ? 0 : Long.parseLong(csvRecord.get("Active"));
           LocalDateTime lastUpdate = parseCSSEDateTime(csvRecord.get("Last_Update"));
           ZonedDateTime utcDateTime = lastUpdate.atZone(UTC);
 
